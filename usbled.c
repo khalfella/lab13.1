@@ -12,7 +12,7 @@ struct usb_led {
 	struct usb_endpoint_descriptor	*interrupt_in_endpoint;
 	u8				irq_data;
 	u8				led_number;
-	u8				ibuffer;
+	char				*ibuffer;
 	int				interrupt_out_interval;
 	int				ep_in;
 	int				ep_out;
@@ -98,14 +98,15 @@ static void led_urb_in_callback(struct urb *urb)
 		}
 	}
 
-	if (dev->ibuffer == 0x00)
-		pr_info("switch is ON.\n");
-	else if (dev->ibuffer == 0x01)
-		pr_info("switch is OFF.\n");
+	char buf = dev->ibuffer[0];
+	if (buf == 0x00)
+		pr_info("switch is ON, val = 0x%01x\n", buf);
+	else if (buf == 0x01)
+		pr_info("switch is OFF, val = 0x%01x\n", buf);
 	else
-		pr_info("bad value received\n");
+		pr_info("bad value received, val = 0x%01x\n", buf);
 	
-	retval = usb_submit_urb(dev->interrupt_in_urb, GFP_KERNEL);
+	retval = usb_submit_urb(dev->interrupt_in_urb, GFP_ATOMIC);
 	if (retval)
 		dev_err(&dev->udev->dev,
 			"Could not submit interrup_in_urb %d", retval);
@@ -139,8 +140,8 @@ static int led_probe(struct usb_interface *intf, const struct usb_device_id *id)
 
 	dev_info(&intf->dev, "endpoint size %d, number %d\n", size, ep);
 
-	ep_in = altsetting->endpoint[0].desc.bEndpointAddress;
-	ep_out = altsetting->endpoint[1].desc.bEndpointAddress;
+	ep_in = altsetting->endpoint[1].desc.bEndpointAddress;
+	ep_out = altsetting->endpoint[0].desc.bEndpointAddress;
 
 	dev_info(&intf->dev, "ep_in = %d, ep_out = %d\n", ep_in, ep_out);
 
@@ -170,11 +171,18 @@ static int led_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	if (!dev->interrupt_in_urb)
 		goto error_out;
 	
+
+	dev->ibuffer = kmalloc(1, GFP_KERNEL);
+	if (!dev->ibuffer) {
+		dev_err(&dev->udev->dev, "failed to allocate ibuffer\n");
+		goto error_free_urbs;
+	}
+	
 	/* Initialize int_in_urb */
 	usb_fill_int_urb(dev->interrupt_in_urb,
 			 dev->udev,
 			 usb_rcvintpipe(dev->udev, ep_in),
-			 (void *)&dev->ibuffer, 1,
+			 dev->ibuffer, 1,
 			 led_urb_in_callback, dev, 1);
 	
 	usb_set_intfdata(intf, dev);
@@ -195,6 +203,8 @@ static int led_probe(struct usb_interface *intf, const struct usb_device_id *id)
 	return 0;
 
 error_create_file:
+	kfree(dev->ibuffer);
+error_free_urbs:
 	usb_free_urb(dev->interrupt_out_urb);
 	usb_free_urb(dev->interrupt_in_urb);
 	usb_put_dev(udev);
@@ -209,6 +219,7 @@ static void led_disconnect(struct usb_interface *intf)
 	struct usb_led *dev = usb_get_intfdata(intf);
 
 	device_remove_file(&intf->dev, &dev_attr_led);
+	kfree(dev->ibuffer);
 	usb_free_urb(dev->interrupt_out_urb);
 	usb_free_urb(dev->interrupt_in_urb);
 	usb_set_intfdata(intf, NULL);
